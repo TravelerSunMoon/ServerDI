@@ -31,8 +31,8 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# tool/ditool.py inside this repository, or ../tool/ditool.py (layout of older packages)
-DEFAULT_DITOOL = next((p for p in (os.path.join(HERE, "tool", "ditool.py"),
+# $DITOOL, tool/ditool.py inside this repository, or ../tool/ditool.py (layout of older packages)
+DEFAULT_DITOOL = next((p for p in (os.environ.get("DITOOL", ""), os.path.join(HERE, "tool", "ditool.py"),
                                    os.path.join(os.path.dirname(HERE), "tool", "ditool.py")) if os.path.exists(p)),
                       os.path.join(HERE, "tool", "ditool.py"))
 FLAG = b"UI_IsTOGOOfflineGame"
