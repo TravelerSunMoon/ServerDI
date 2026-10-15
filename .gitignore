@@ -1,0 +1,18 @@
+# runtime data: accounts, saves, request logs, detected changes
+data/
+# Python
+__pycache__/
+*.pyc
+# build outputs of dinet/build.bat
+dinet/*.obj
+dinet/*.exp
+dinet/*.lib
+dinet/*.pdb
+# third-party container tool (see tool/README.md)
+tool/ditool.py
+# logs and packages
+*.log
+*.zip
+# Unity (this folder lives inside a Unity project's Assets)
+*.meta
+public_ip.txt
