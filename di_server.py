@@ -29,8 +29,8 @@ How the game is served (as observed from the game's own requests):
   5. Entitlement (bought Sparks / codes) always answers "nothing to redeem" (404):
      this server does not grant paid content.
 
-  6. Lobby, friends, invites and join requests for the client helper dinet_bk.dll live under
-     /dinet/v1/ (see h_lobby / h_social).
+  6. Lobby, friends, invites, join requests and text chat for the client helper dinet_bk.dll
+     live under /dinet/v1/ (see h_lobby / h_social / h_chat).
   7. Diagnostics: GET /_status (players online, warnings, watched game state) and
      GET /_changes?since=<id> (change events detected by gamewatch.py).
 
@@ -58,7 +58,11 @@ import gamewatch  # noqa: E402
 VERSION = "0.2"
 HERE = os.path.dirname(os.path.abspath(__file__))
 # client helper shipped with the client mod, used to spot an outdated copy in the watched game folder
-DEFAULT_CLIENT_DLL = os.path.join(os.path.dirname(HERE), "ServerDI_Client", "dinet_online", "dinet_bk.dll")
+# (ServerDI_Client next to this folder, or the dinet\ build folder of the development copy)
+DEFAULT_CLIENT_DLL = next((p for p in (
+    os.path.join(os.path.dirname(HERE), "ServerDI_Client", "dinet_online", "dinet_bk.dll"),
+    os.path.join(HERE, "dinet", "dinet_bk.dll")) if os.path.exists(p)),
+    os.path.join(os.path.dirname(HERE), "ServerDI_Client", "dinet_online", "dinet_bk.dll"))
 
 # config key -> path on this server (same paths as the original Steam production services)
 CONFIG_PATHS = {
@@ -94,7 +98,9 @@ CONFIG_LITERALS = {"url_radio_disney": "INACTIVE", "domain_cg_natneg": "disney.c
 SINK_PREFIXES = ("/datatech/", "/disneynetwork/activitystream/", "/gxtools/", "/coregames/sessions/")
 # polled every few seconds by dinet_bk.dll: not printed / logged when they succeed
 POLL_PREFIXES = ("/dinet/v1/host", "/dinet/v1/presence", "/dinet/v1/players", "/dinet/v1/invites",
-                 "/dinet/v1/requests")
+                 "/dinet/v1/requests", "/dinet/v1/chat")
+CHAT_KEEP = 200          # messages kept in memory (clients only ask for the ones newer than they have)
+CHAT_TEXT = 120          # longest message, in characters
 
 
 def lan_ip():
@@ -219,6 +225,12 @@ class Store:
                 if os.path.exists(x):
                     os.remove(x)
             return existed
+
+    def chat_log(self, msg):
+        """Appends one chat message to data/logs/chat.jsonl."""
+        with self.lock:
+            with open(os.path.join(self.root, "logs", "chat.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
     def log(self, entry):
         """Appends one request record to data/logs/requests.jsonl."""
@@ -357,6 +369,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"items": [], "page": 1, "page_size": 1000, "page_count": 1,
                                         "total_items": 0})
             return self._send(200, body, ctype)
+        if lp == "/dinet/v1/chat":
+            return self.h_chat()
         if lp.startswith("/dinet/v1/"):
             return self.h_lobby(lp[len("/dinet/v1/"):])
         if lp == "/_status":
@@ -540,6 +554,45 @@ class Handler(BaseHTTPRequestHandler):
             lines = [self._player_line(f, hosts) for f in sorted(mine, key=lambda f: mine[f])]
             return self._send(200, "".join(l + "\n" for l in lines), "text/plain")
         return self._send(404, "unknown lobby call\n", "text/plain")
+
+    # ------------------------------------------------------------------ text chat (dinet_bk.dll)
+    # Every game connected to the server shares one chat; the client shows a message above the head of the
+    # player who said it when that player is in the same Toy Box, and in its chat log otherwise.
+    #   POST /dinet/v1/chat  name=&tag=&text=        say something. tag = the sender's in-game gamer tag,
+    #                                                which the other games use to find the speaker's avatar
+    #   GET  /dinet/v1/chat?name=&since=<id>         "#<last id>" line, then for every message newer than <id>
+    #                                                not said by <name>: id TAB name TAB tag TAB text.
+    #                                                since missing or negative: only the "#<last id>" line
+    #                                                (a game that just started does not replay old messages)
+    def h_chat(self):
+        """Text chat between the connected games (see the comment above)."""
+        srv = self.server
+        if self.command == "POST":
+            form = parse_qs(self.body.decode("utf-8", "replace"))
+            clean = lambda k, n: re.sub(r"[\x00-\x1f\x7f]+", " ", (form.get(k) or [""])[0]).strip()[:n]
+            name, tag, text = clean("name", 40), clean("tag", 60), clean("text", CHAT_TEXT)
+            if not name or not text:
+                return self._send(400, "name/text missing\n", "text/plain")
+            with srv.chat_lock:
+                msg = dict(id=srv.chat_next, name=name, tag=tag, text=text, t=now_iso())
+                srv.chat_next += 1
+                srv.chat.append(msg)
+                del srv.chat[:-CHAT_KEEP]
+            print("  chat: %s: %s" % (name, text))
+            srv.store.chat_log(msg)
+            return self._send(200, "%d\n" % msg["id"], "text/plain")
+        if self.command in ("GET", "HEAD"):
+            me = (self.query.get("name") or [""])[0].strip().lower()
+            try:
+                since = int((self.query.get("since") or ["-1"])[0])
+            except ValueError:
+                since = -1
+            with srv.chat_lock:
+                last = srv.chat_next - 1
+                new = [m for m in srv.chat if since >= 0 and m["id"] > since and m["name"].lower() != me]
+            lines = ["#%d" % last] + ["%d\t%s\t%s\t%s" % (m["id"], m["name"], m["tag"], m["text"]) for m in new]
+            return self._send(200, "".join(l + "\n" for l in lines), "text/plain")
+        return self._send(405, "method not allowed\n", "text/plain")
 
     # ------------------------------------------------------------------ services
     def h_config(self):
@@ -801,6 +854,7 @@ def main(argv=None):
     srv.presence = {}
     srv.invites = {}
     srv.requests = {}
+    srv.chat, srv.chat_next, srv.chat_lock = [], 1, threading.Lock()
     srv.player_name = a.name
     srv.country = a.country
     srv.allow_login = a.allow_login

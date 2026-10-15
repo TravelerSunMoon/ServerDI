@@ -112,7 +112,10 @@ def write_dinet_ini(path, base):
     for sec, key, value in (("signin", "block_signout", "1"), ("net", "port", "9104"),
                             ("saves", "local_toybox_list", "1"), ("saves", "protect", "1"),
                             ("signin", "skip_migration_warning", "1"), ("net", "invite_popup", "1"),
-                            ("net", "force_multiplayer_levels", "1")):
+                            ("net", "force_multiplayer_levels", "1"), ("chat", "enabled", "1"),
+                            ("chat", "seconds", "8"), ("chat", "fov", "55"), ("chat", "head_height", "2.2"),
+                            ("chat", "mirror", "0"), ("chat", "poll_ms", "1000"), ("chat", "debug", "0"),
+                            ("chat", "theme", "1")):
         if not cp.has_section(sec):
             cp.add_section(sec)
         if not cp.has_option(sec, key):
@@ -133,6 +136,14 @@ def write_dinet_ini(path, base):
                 "; [saves] local_toybox_list=1: the Toy Box menu reads the local saves even when signed in;\n"
                 ";         protect=1: saves are copied to di_saves\\<time> at start, and the files the\n"
                 ";         migration removes are copied back when it ends\n"
+                "; [chat] enabled=1: key T opens the text chat in game (CrabeLoader mod only);\n"
+                ";        seconds = how long a speech bubble stays; fov = the game's vertical field of view used\n"
+                ";        to place the bubbles; head_height = how high above a character's feet they appear;\n"
+                ";        mirror=1 if bubbles show on the wrong side; poll_ms = how often new messages are\n"
+                ";        fetched; debug=1 writes camera / player details to di_net.log;\n"
+                ";        theme=1: the chat takes the colours of the playset you play (0 = always blue)\n"
+                "; [chat_colors] (optional) your own colours per playset: <playset> = border,panel,name as RRGGBB,\n"
+                ";        e.g. InsideOut = EB6EC8,3C1955,FFC8F0. di_net.log shows the playset name on every level\n"
                 "; [server] url = the local server (set by patch_exe.py)\n")
         cp.write(f)
 

@@ -128,6 +128,7 @@ class ServerTest(unittest.TestCase):
         srv.watch.start(0)
         srv.public_url, srv.public_fixed, srv.public_ip = "http://127.0.0.1", False, ""
         srv.lobby, srv.presence, srv.invites, srv.requests = {}, {}, {}, {}
+        srv.chat, srv.chat_next, srv.chat_lock = [], 1, threading.Lock()
         srv.player_name, srv.country, srv.allow_login = "Player", "US", True
         cls.srv = srv
         cls.base = "http://127.0.0.1:%d" % srv.server_address[1]
@@ -186,6 +187,29 @@ class ServerTest(unittest.TestCase):
         last = ev[-1]["id"]
         self.assertEqual(json.loads(self.call("GET", "/_changes?since=%d" % last)[1])["events"], [])
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "data", "watch_state.json")))
+
+    def test_chat(self):
+        form = "application/x-www-form-urlencoded"
+        # a game that just started only learns the last id
+        st, body = self.call("GET", "/dinet/v1/chat?name=bob", agent="dinet_bk/3")
+        start = int(body.decode().splitlines()[0][1:])
+        st, body = self.call("POST", "/dinet/v1/chat", urlencode(dict(name="ana", tag="Ana_Steam",
+                                                                       text="hola\tmundo\n!")), "dinet_bk/3", form)
+        self.assertEqual(st, 200)
+        self.call("POST", "/dinet/v1/chat", urlencode(dict(name="bob", tag="Bob", text="hi")), "dinet_bk/3", form)
+        self.assertEqual(self.call("POST", "/dinet/v1/chat", urlencode(dict(name="bob", text="")), "dinet_bk/3",
+                                   form)[0], 400)
+        lines = self.call("GET", "/dinet/v1/chat?name=bob&since=%d" % start)[1].decode().splitlines()
+        self.assertEqual(lines[0], "#%d" % (start + 2))
+        self.assertEqual(lines[1:], ["%d\tana\tAna_Steam\thola mundo !" % (start + 1)])   # not bob's own
+        self.assertEqual(self.call("GET", "/dinet/v1/chat?name=bob&since=%d" % (start + 2))[1].decode(),
+                         "#%d\n" % (start + 2))
+        long = self.call("POST", "/dinet/v1/chat", urlencode(dict(name="ana", text="x" * 500)), "dinet_bk/3", form)
+        self.assertEqual(long[0], 200)
+        last = self.call("GET", "/dinet/v1/chat?name=bob&since=%d" % (start + 2))[1].decode().splitlines()[1]
+        self.assertEqual(len(last.split("\t")[3]), di_server.CHAT_TEXT)
+        with open(os.path.join(self.tmp, "data", "logs", "chat.jsonl"), encoding="utf-8") as f:
+            self.assertEqual(len(f.readlines()), 3)
 
 
 if __name__ == "__main__":

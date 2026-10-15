@@ -33,6 +33,11 @@
  *     the game starts, and the first sign-out of the run (the end of the migration)
  *     copies back every save file the migration removed. Changed files are kept.
  *
+ * Stage 5 - text chat. The CrabeLoader mod (main.lua) draws a chat box (key T) and speech bubbles; this
+ * DLL turns key presses into text with the player's keyboard layout ("#dinet:chatkey:<vk>"), sends what
+ * was said to the server ("#dinet:chatsend:<gamer tag> TAB <text>") and hands the messages of the other
+ * players to Lua ("#dinet:chat"), polled from the server every [chat] poll_ms by its own thread.
+ *
  * Build: build.bat (Visual Studio 2022, x86).
  */
 #define WIN32_LEAN_AND_MEAN
@@ -46,11 +51,15 @@
 #include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
+#define DIRECTINPUT_VERSION 0x0800
+#include <dinput.h>
 #include "bink_forwards.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "dinput8.lib")
+#pragma comment(lib, "dxguid.lib")
 
 /* Steam build 1522802, md5 7ee2954a6c6ca7070bb4bfba0a8b9f94, linked at 0x400000. */
 #define LINK_BASE            0x00400000u
@@ -1018,7 +1027,7 @@ static int http(const wchar_t* verb, const char* path, const char* body, char* o
     MultiByteToWideChar(CP_UTF8, 0, g_serverHost, -1, whost, 128);
     MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 256);
     if (out && outSize) out[0] = 0;
-    s = WinHttpOpen(L"dinet_bk/2", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    s = WinHttpOpen(L"dinet_bk/3",                 /* protocol version: 3 = text chat */ WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!s) goto done;
     WinHttpSetTimeouts(s, 3000, 3000, 3000, 5000);
     c = WinHttpConnect(s, whost, (INTERNET_PORT)g_serverPort, 0);
@@ -1227,6 +1236,235 @@ static volatile DWORD g_luaPollTick;        /* last "notice" from the HUD: it sh
 static DWORD   g_transImm, g_transBack;
 static volatile LONG g_joinPopupPending;
 
+/* ------------------------------------------------------------------ stage 5: text chat */
+#define CHAT_MAX_BYTES 480                  /* 120 characters of up to 4 UTF-8 bytes */
+static CRITICAL_SECTION g_chatLock;
+static char    g_chatOut[8][CHAT_MAX_BYTES + 80];   /* "tag TAB text" waiting to be sent */
+static int     g_chatOutLen;
+static char    g_chatIn[8000];              /* "id TAB name TAB tag TAB text" lines not yet taken by Lua */
+static long    g_chatLast = -1;             /* newest message id seen; -1 = not asked yet */
+static int     g_chatEnabled = 1, g_chatPollMs = 1000;
+static char    g_chatCfg[128];              /* answer to "chatcfg", built from [chat] in di_net.ini */
+static WCHAR   g_chatDead;                  /* dead key (accent) waiting for its letter */
+static volatile LONG g_editorOpen;          /* Toy Box editor screens open now: no chat while > 0 */
+
+/* queues "tag TAB text" for the chat thread */
+static void chat_send(const char* msg)
+{
+    EnterCriticalSection(&g_chatLock);
+    if (g_chatOutLen < 8) {
+        strncpy(g_chatOut[g_chatOutLen], msg, sizeof(g_chatOut[0]) - 1);
+        g_chatOut[g_chatOutLen][sizeof(g_chatOut[0]) - 1] = 0;
+        g_chatOutLen++;
+    }
+    LeaveCriticalSection(&g_chatLock);
+}
+
+/* letter + accent typed with a dead key (Spanish, French... layouts), 0 when they do not combine */
+static WCHAR chat_compose(WCHAR dead, WCHAR c)
+{
+    static const struct { WCHAR dead; const WCHAR* base; const WCHAR* out; } t[] = {
+        { 0x00B4, L"aeiouyAEIOUY", L"\x00E1\x00E9\x00ED\x00F3\x00FA\x00FD\x00C1\x00C9\x00CD\x00D3\x00DA\x00DD" },
+        { 0x0027, L"aeiouyAEIOUY", L"\x00E1\x00E9\x00ED\x00F3\x00FA\x00FD\x00C1\x00C9\x00CD\x00D3\x00DA\x00DD" },
+        { 0x0060, L"aeiouAEIOU",   L"\x00E0\x00E8\x00EC\x00F2\x00F9\x00C0\x00C8\x00CC\x00D2\x00D9" },
+        { 0x00A8, L"aeiouyAEIOU",  L"\x00E4\x00EB\x00EF\x00F6\x00FC\x00FF\x00C4\x00CB\x00CF\x00D6\x00DC" },
+        { 0x0022, L"aeiouyAEIOU",  L"\x00E4\x00EB\x00EF\x00F6\x00FC\x00FF\x00C4\x00CB\x00CF\x00D6\x00DC" },
+        { 0x005E, L"aeiouAEIOU",   L"\x00E2\x00EA\x00EE\x00F4\x00FB\x00C2\x00CA\x00CE\x00D4\x00DB" },
+        { 0x007E, L"anoANO",       L"\x00E3\x00F1\x00F5\x00C3\x00D1\x00D5" },
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(t) / sizeof(t[0])); i++) {
+        const WCHAR* p;
+        if (t[i].dead != dead) continue;
+        for (p = t[i].base; *p; p++)
+            if (*p == c) return t[i].out[p - t[i].base];
+    }
+    return 0;
+}
+
+/* The text a key press types with the current keyboard layout and Shift / Caps Lock / AltGr, as UTF-8
+ * ("" for keys that type nothing, and for a dead key, which waits for the next letter). */
+static void chat_key(int vk, char* out, int size)
+{
+    BYTE ks[256];
+    WCHAR w[8], text[4];
+    HWND win = game_window();
+    HKL hkl = GetKeyboardLayout(win ? GetWindowThreadProcessId(win, NULL) : 0);
+    int i, n, len = 0;
+    out[0] = 0;
+    if (vk <= 0 || vk > 254) return;
+    for (i = 0; i < 256; i++) ks[i] = (GetAsyncKeyState(i) & 0x8000) ? 0x80 : 0;
+    if (GetKeyState(VK_CAPITAL) & 1) ks[VK_CAPITAL] |= 1;
+    ks[vk] |= 0x80;
+    /* flag 4: leave the system's keyboard state (and its dead key) alone; dead keys are composed here */
+    n = ToUnicodeEx((UINT)vk, MapVirtualKeyExA((UINT)vk, 0 /* MAPVK_VK_TO_VSC */, hkl), ks, w, 8, 4, hkl);
+    if (n < 0) {                                /* a dead key: remember its accent */
+        g_chatDead = w[0];
+        return;
+    }
+    if (n == 0 || w[0] < 0x20) return;
+    if (g_chatDead) {
+        WCHAR c = chat_compose(g_chatDead, w[0]);
+        if (c) text[len++] = c;
+        else { text[len++] = g_chatDead; text[len++] = w[0]; }
+        g_chatDead = 0;
+    } else {
+        text[len++] = w[0];
+    }
+    n = WideCharToMultiByte(CP_UTF8, 0, text, len, out, size - 1, NULL, NULL);
+    out[n > 0 ? n : 0] = 0;
+}
+
+/* While the chat line is open the game must not see the keyboard. It reads the keyboard through
+ * DirectInput, which window-message key filters do not reach, so the DirectInput device methods that
+ * return key states (GetDeviceState, GetDeviceData) are hooked in the device vtables of dinput8.dll,
+ * shared by every device the game created: while typing, a keyboard device reports no key down and no
+ * key event. Mouse devices (the camera) are left alone. main.lua renews "typing:1" several times a
+ * second; the flag expires by itself after a second, so a lost "typing:0" cannot leave the keyboard dead. */
+static volatile DWORD g_typingTick;          /* last "typing:1" from main.lua; 0 = not typing */
+#define DI_VT_GETDEVICESTATE 9
+#define DI_VT_GETDEVICEDATA  10
+typedef HRESULT (__stdcall* di_state_fn)(void* self, DWORD cb, LPVOID data);
+typedef HRESULT (__stdcall* di_data_fn)(void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rgdod, LPDWORD inOut, DWORD flags);
+typedef HRESULT (__stdcall* di_caps_fn)(void* self, LPDIDEVCAPS caps);
+static di_state_fn g_diState[2];
+static di_data_fn  g_diData[2];
+static struct { void* dev; int keyboard; } g_diKinds[16];
+
+static int chat_typing(void)
+{
+    DWORD t = g_typingTick;
+    return t && GetTickCount() - t < 1000;
+}
+
+/* 1 when a DirectInput device is a keyboard (asked once per device, then remembered) */
+static int di_is_keyboard(void* self)
+{
+    DIDEVCAPS caps;
+    int i, free = -1;
+    for (i = 0; i < 16; i++) {
+        if (g_diKinds[i].dev == self) return g_diKinds[i].keyboard;
+        if (!g_diKinds[i].dev && free < 0) free = i;
+    }
+    memset(&caps, 0, sizeof(caps));
+    caps.dwSize = sizeof(caps);
+    i = SUCCEEDED(((di_caps_fn)(*(void***)self)[3])(self, &caps)) && GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_KEYBOARD;
+    if (free >= 0) { g_diKinds[free].keyboard = i; g_diKinds[free].dev = self; }
+    return i;
+}
+
+#define DI_HOOKS(n)                                                                                         \
+static HRESULT __stdcall di_state_##n(void* self, DWORD cb, LPVOID data)                                    \
+{                                                                                                           \
+    HRESULT r = g_diState[n](self, cb, data);                                                               \
+    if (SUCCEEDED(r) && data && chat_typing() && di_is_keyboard(self)) memset(data, 0, cb);                  \
+    return r;                                                                                               \
+}                                                                                                           \
+static HRESULT __stdcall di_data_##n(void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rgdod, LPDWORD inOut,    \
+                                      DWORD flags)                                                          \
+{                                                                                                           \
+    HRESULT r = g_diData[n](self, cbObj, rgdod, inOut, flags);                                              \
+    if (SUCCEEDED(r) && inOut && chat_typing() && di_is_keyboard(self)) *inOut = 0;   /* events dropped */  \
+    return r;                                                                                               \
+}
+DI_HOOKS(0)
+DI_HOOKS(1)
+
+static int di_patch(void** vt, int n, void* state, void* data)
+{
+    DWORD old;
+    if (vt[DI_VT_GETDEVICESTATE] == state) return 1;             /* already done (A and W share it) */
+    if (!VirtualProtect(&vt[DI_VT_GETDEVICESTATE], 2 * sizeof(void*), PAGE_READWRITE, &old)) return 0;
+    g_diState[n] = (di_state_fn)vt[DI_VT_GETDEVICESTATE];
+    g_diData[n] = (di_data_fn)vt[DI_VT_GETDEVICEDATA];
+    vt[DI_VT_GETDEVICESTATE] = state;
+    vt[DI_VT_GETDEVICEDATA] = data;
+    VirtualProtect(&vt[DI_VT_GETDEVICESTATE], 2 * sizeof(void*), old, &old);
+    return 1;
+}
+
+/* hooks the keyboard device vtables of both DirectInput interfaces (ANSI and Unicode) */
+static void hook_directinput(void)
+{
+    static const IID* iids[2] = { &IID_IDirectInput8A, &IID_IDirectInput8W };
+    int n, done = 0;
+    for (n = 0; n < 2; n++) {
+        IDirectInput8A* di = NULL;
+        IDirectInputDevice8A* dev = NULL;
+        if (FAILED(DirectInput8Create(GetModuleHandleA(NULL), DIRECTINPUT_VERSION, iids[n], (void**)&di, NULL)) || !di)
+            continue;
+        if (SUCCEEDED(di->lpVtbl->CreateDevice(di, &GUID_SysKeyboard, &dev, NULL)) && dev) {
+            void** vt = *(void***)dev;
+            if (vt[DI_VT_GETDEVICESTATE] == (void*)di_state_0 || vt[DI_VT_GETDEVICESTATE] == (void*)di_state_1) done++;
+            else if (di_patch(vt, n, n ? (void*)di_state_1 : (void*)di_state_0, n ? (void*)di_data_1 : (void*)di_data_0))
+                done++;
+            dev->lpVtbl->Release(dev);
+        }
+        di->lpVtbl->Release(di);
+    }
+    logf(done ? "chat: the game's keyboard is silenced while typing (DirectInput hooked)"
+              : "chat: DirectInput not hooked; the character may move while typing");
+}
+
+/* sends the queued messages and fetches the new ones of the other players */
+static DWORD WINAPI chat_worker(LPVOID unused)
+{
+    static char buf[16384];
+    char msg[CHAT_MAX_BYTES + 80], enc[128], etag[256], etext[CHAT_MAX_BYTES * 3 + 8], body[2048], path[256];
+    char *tab, *line, *next;
+    (void)unused;
+    hook_directinput();                         /* here, not in DllMain: it may load DLLs */
+    Sleep(3000);                                /* the Steam name arrives with the game */
+    for (;;) {
+        for (;;) {
+            EnterCriticalSection(&g_chatLock);
+            if (!g_chatOutLen) { LeaveCriticalSection(&g_chatLock); break; }
+            strcpy(msg, g_chatOut[0]);
+            memmove(g_chatOut[0], g_chatOut[1], sizeof(g_chatOut[0]) * (--g_chatOutLen));
+            LeaveCriticalSection(&g_chatLock);
+            tab = strchr(msg, '\t');
+            if (!tab) continue;
+            *tab = 0;
+            if (strlen(tab + 1) > CHAT_MAX_BYTES) tab[1 + CHAT_MAX_BYTES] = 0;
+            url_encode(g_name, enc, sizeof(enc));
+            url_encode(msg, etag, sizeof(etag));
+            url_encode(tab + 1, etext, sizeof(etext));
+            _snprintf(body, sizeof(body), "name=%s&tag=%s&text=%s", enc, etag, etext);
+            body[sizeof(body) - 1] = 0;
+            if (http(L"POST", "/dinet/v1/chat", body, NULL, 0)) logf("chat: %s said: %s", g_name, tab + 1);
+            else logf("chat: the server did not take the message: %s", tab + 1);
+        }
+        url_encode(g_name, enc, sizeof(enc));
+        _snprintf(path, sizeof(path), "/dinet/v1/chat?name=%s&since=%ld", enc, g_chatLast);
+        path[sizeof(path) - 1] = 0;
+        if (http(L"GET", path, NULL, buf, sizeof(buf))) {
+            long newest = g_chatLast;
+            for (line = buf; line && *line; line = next) {
+                long id;
+                next = strchr(line, '\n');
+                if (next) *next++ = 0;
+                if (line[0] == '#') {                   /* "#<last id on the server>" */
+                    long last = atol(line + 1);
+                    if (g_chatLast < 0 || last > newest) newest = last;
+                    continue;
+                }
+                id = atol(line);
+                if (g_chatLast < 0 || id <= g_chatLast) continue;
+                EnterCriticalSection(&g_chatLock);
+                if (strlen(g_chatIn) + strlen(line) + 2 < sizeof(g_chatIn)) {
+                    strcat(g_chatIn, line);
+                    strcat(g_chatIn, "\n");
+                }
+                LeaveCriticalSection(&g_chatLock);
+                logf("chat: %s", line);
+                if (id > newest) newest = id;
+            }
+            g_chatLast = newest < 0 ? 0 : newest;
+        }
+        Sleep(g_chatPollMs);
+    }
+}
+
 static void enqueue(const char* cmd)
 {
     EnterCriticalSection(&g_socialLock);
@@ -1414,6 +1652,47 @@ static const char* bridge(const char* cmd)
     if (!strncmp(cmd, "log:", 4)) {
         logf("lua: %s", cmd + 4);
         return "ok";
+    }
+    /* stage 5: text chat (main.lua). Asked many times a second: never logged here */
+    if (!strncmp(cmd, "editor:", 7)) {              /* Toy Box editor screens: "+name" open, "-name" closed */
+        if (cmd[7] == '+') InterlockedIncrement(&g_editorOpen);
+        else if (cmd[7] == '-') { if (InterlockedDecrement(&g_editorOpen) < 0) InterlockedExchange(&g_editorOpen, 0); }
+        else InterlockedExchange(&g_editorOpen, 0);  /* "reset": a new level was loaded */
+        logf("chat: toy box editor %s (%ld screen(s) open)", cmd + 7, g_editorOpen);
+        return "ok";
+    }
+    if (!strcmp(cmd, "editor")) return g_editorOpen > 0 ? "1" : "0";
+    if (!strncmp(cmd, "ini:", 4)) {                 /* "ini:<section> TAB <key>": a value of di_net.ini, or "" */
+        char section[64] = "";
+        const char* key = strchr(cmd + 4, '\t');
+        if (!key || key - (cmd + 4) >= (int)sizeof(section)) return "";
+        memcpy(section, cmd + 4, key - (cmd + 4));
+        section[key - (cmd + 4)] = 0;
+        GetPrivateProfileStringA(section, key + 1, "", reply, sizeof(reply), g_iniPath);
+        return reply;
+    }
+    if (!strcmp(cmd, "chatcfg")) return g_chatCfg;
+    if (!strncmp(cmd, "typing:", 7)) {              /* main.lua: the chat line is open (renewed) / closed */
+        DWORD now = GetTickCount();
+        g_typingTick = cmd[7] == '1' ? (now ? now : 1) : 0;
+        return "ok";
+    }
+    if (!strncmp(cmd, "chatkey:", 8)) {
+        chat_key(atoi(cmd + 8), reply, sizeof(reply));
+        return reply;
+    }
+    if (!strncmp(cmd, "chatsend:", 9)) {
+        if (!g_chatEnabled) return "off";
+        chat_send(cmd + 9);
+        return "ok";
+    }
+    if (!strcmp(cmd, "chat")) {                     /* new lines of the other players, then forgotten */
+        EnterCriticalSection(&g_chatLock);
+        strncpy(reply, g_chatIn, sizeof(reply) - 1);
+        reply[sizeof(reply) - 1] = 0;
+        g_chatIn[0] = 0;
+        LeaveCriticalSection(&g_chatLock);
+        return reply;
     }
     /* notice: the HUD asks every second for something to show in game:
      * "request TAB name" (wants to join us), "accepted TAB name" (accepted our request: an invite),
@@ -1870,6 +2149,20 @@ static void read_settings(void)
     if ((colon = strchr(host, ':')) != NULL) { *colon = 0; g_serverPort = atoi(colon + 1); }
     else g_serverPort = 80;
     strncpy(g_serverHost, host, sizeof(g_serverHost) - 1);
+    {   /* stage 5: chat. The drawing settings are only passed on to main.lua ("chatcfg") */
+        char fov[16], head[16];
+        g_chatEnabled = GetPrivateProfileIntA("chat", "enabled", 1, g_iniPath);
+        g_chatPollMs = GetPrivateProfileIntA("chat", "poll_ms", 1000, g_iniPath);
+        if (g_chatPollMs < 250) g_chatPollMs = 250;
+        if (g_chatPollMs > 10000) g_chatPollMs = 10000;
+        GetPrivateProfileStringA("chat", "fov", "55", fov, sizeof(fov), g_iniPath);
+        GetPrivateProfileStringA("chat", "head_height", "2.2", head, sizeof(head), g_iniPath);
+        _snprintf(g_chatCfg, sizeof(g_chatCfg), "%d\t%s\t%s\t%d\t%d\t%d", g_chatEnabled, fov, head,
+                  GetPrivateProfileIntA("chat", "mirror", 0, g_iniPath),
+                  GetPrivateProfileIntA("chat", "seconds", 8, g_iniPath),
+                  GetPrivateProfileIntA("chat", "debug", 0, g_iniPath));
+        g_chatCfg[sizeof(g_chatCfg) - 1] = 0;
+    }
 }
 
 static void start(void)
@@ -1884,6 +2177,7 @@ static void start(void)
     _snprintf(g_iniPath, MAX_PATH, "%s\\di_net.ini", dir);
     _snprintf(g_luaPath, MAX_PATH, "%s\\dinet.lua", dir);
     InitializeCriticalSection(&g_socialLock);
+    InitializeCriticalSection(&g_chatLock);
     read_settings();
 
     g_base = (DWORD)GetModuleHandleA(NULL);
@@ -1978,6 +2272,10 @@ static void start(void)
 
     CloseHandle(CreateThread(NULL, 0, worker, NULL, 0, NULL));
     CloseHandle(CreateThread(NULL, 0, social_worker, NULL, 0, NULL));
+    if (g_chatEnabled) {
+        CloseHandle(CreateThread(NULL, 0, chat_worker, NULL, 0, NULL));
+        logf("chat: on (key T in game, poll every %d ms)", g_chatPollMs);
+    }
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)

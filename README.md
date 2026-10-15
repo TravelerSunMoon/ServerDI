@@ -7,6 +7,7 @@ replacement on your own PC or local network, so the game's online features work 
 - profile and cloud saves
 - the Toy Box store
 - friends, invites and join requests
+- text chat: press **T** in game, and the text shows above your character's head
 - two-player Toy Boxes over the game's own Net-Z networking
 
 It is written in plain Python 3 with only the standard library, and it learns from the game's own
@@ -84,7 +85,7 @@ python di_server.py [options]
 | Moderation | Every text is accepted. |
 | Entitlement, MagicBand | "Nothing here" (404). |
 | CDN (posters, icons) | Files from `data/cdn/`, if you add any. |
-| Lobby (`/dinet/v1/...`) | Hosts, presence, friends, invites and join requests for the client helper. |
+| Lobby (`/dinet/v1/...`) | Hosts, presence, friends, invites, join requests and text chat for the client helper. |
 | `/_status`, `/_changes` | Diagnostics: players online, warnings, watched game state, change events. |
 
 The full HTTP reference is in [docs/http-api.md](docs/http-api.md).

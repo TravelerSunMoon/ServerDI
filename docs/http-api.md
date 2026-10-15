@@ -72,6 +72,16 @@ characters.
 first part differs number the levels differently. The server prints a warning and lists it under
 `/_status` warnings.
 
+### Text chat
+
+| Call | Purpose |
+|---|---|
+| `POST chat` `name, tag, text` | Say something. `tag` is the sender's in-game gamer tag, which the other games use to find the speaker's avatar. Control characters become spaces and the text is cut to 120 characters. Replies with the message id. |
+| `GET chat?name=&since=<id>` | First line `#<last id>`, then `id  name  tag  text` for every message newer than `<id>` that `name` didn't send. If `since` is missing or negative, only the `#<last id>` line comes back, so a game that just started doesn't replay old messages. |
+
+The server keeps the last 200 messages in memory, prints each one on the console, and appends it to
+`data/logs/chat.jsonl`. Every game connected to the server shares one chat.
+
 `ip` is the address the server sees. For a player on the server PC itself, it's `--public-ip` or the
 LAN address instead.
 

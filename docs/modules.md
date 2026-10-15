@@ -20,6 +20,7 @@ Every Python function also has a docstring. This page explains how the pieces fi
   - `h_save`: cloud saves;
   - `h_moderation`, `h_cdn`;
   - `h_lobby` and `h_social`: hosts, presence, invites, join requests;
+  - `h_chat`: text chat (last 200 messages in memory, `data/logs/chat.jsonl`);
   - `/_status` and `/_changes`;
   - anything else goes to `h_store`.
 - **`Server`**: a `ThreadingHTTPServer`. `main()` attaches the shared state to it: `store`, `watch`,
@@ -105,7 +106,7 @@ only need it after editing `ui_funcs.lua`.
 
 | File | Purpose |
 |---|---|
-| `dinet.c` | `dinet_bk.dll`: sign-in hooks, save protection, Net-Z host/join, lobby polling, the `#dinet:` bridge for the menus, canonical level ids. |
+| `dinet.c` | `dinet_bk.dll`: sign-in hooks, save protection, Net-Z host/join, lobby polling, the `#dinet:` bridge for the menus, canonical level ids, and the text chat (key-to-text with the player's keyboard layout, a thread that sends and fetches messages). |
 | `bink_forwards.h` | Export forwards to `bink2w32.dll`, for the `--dinet` import method. |
 | `build.bat` | Build with Visual Studio 2022 (x86, `/MT`). |
 | `ui_funcs.lua` / `.luac` | Friends and invites list code embedded in the menu scripts. |
