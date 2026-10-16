@@ -295,7 +295,9 @@ class GameWatcher:
         snap = dict(t=_now(), game=g)
         snap["exe"] = self._file_info(os.path.join(g, "DisneyInfinity3.exe"), old.get("exe"))
         snap["exe_local"] = self._file_info(os.path.join(g, "DisneyInfinity3_local.exe"), old.get("exe_local"))
-        snap["crabeloader"] = os.path.exists(os.path.join(g, "bink2w32_orig.dll"))
+        # CrabeLoader 1.0 replaces bink2w32.dll (keeps bink2w32_orig.dll); 1.1+ is dinput8.dll + CrabeLoader.asi
+        snap["crabeloader"] = (os.path.exists(os.path.join(g, "bink2w32_orig.dll"))
+                               or os.path.exists(os.path.join(g, "CrabeLoader.asi")))
         snap["presentation"] = self._file_info(os.path.join(g, "assets", "presentation", "presentation.zip"),
                                                old.get("presentation"))
         mods = {}
@@ -307,6 +309,9 @@ class GameWatcher:
         snap["mods"] = mods
         snap["client_dll"] = self._file_info(os.path.join(mdir, "dinet_online", "dinet_bk.dll"),
                                              old.get("client_dll"))
+        # CrabeLoader 1.1+ loads this copy (main.lua then leaves the .dll alone)
+        snap["client_asi"] = self._file_info(os.path.join(mdir, "dinet_online", "dinet_bk.asi"),
+                                             old.get("client_asi"))
         return snap
 
     # ---------------------------------------------------------------- compare
@@ -361,17 +366,20 @@ class GameWatcher:
                     mod=m)
         if changed(old.get("client_dll"), new.get("client_dll")):
             add("client_dll_changed", "mods/dinet_online/dinet_bk.dll changed", mod="dinet_online")
+        if changed(old.get("client_asi"), new.get("client_asi")):
+            add("client_dll_changed", "mods/dinet_online/dinet_bk.asi changed", mod="dinet_online")
         return n
 
     def check_client_build(self, snap):
         """Warns when the installed client helper is not the build shipped with the server."""
-        inst = (snap.get("client_dll") or {}).get("md5")
-        if not inst or not self.client_dll or not os.path.exists(self.client_dll):
+        if not self.client_dll or not os.path.exists(self.client_dll):
             return
         ref = md5_file(self.client_dll)
-        if ref and ref != inst:
-            self.log.add("client_dll_mismatch", "the game's mods/dinet_online/dinet_bk.dll is not the build in %s: "
-                         "reinstall the client mod" % self.client_dll, level="warning")
+        for key, name in (("client_dll", "dinet_bk.dll"), ("client_asi", "dinet_bk.asi")):
+            inst = (snap.get(key) or {}).get("md5")
+            if inst and ref and ref != inst:
+                self.log.add("client_dll_mismatch", "the game's mods/dinet_online/%s is not the build in %s: "
+                             "reinstall the client mod" % (name, self.client_dll), level="warning")
 
     def warnings(self):
         """Current problems of the watched game folder."""

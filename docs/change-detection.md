@@ -62,12 +62,12 @@ watcher takes a snapshot of:
 - `DisneyInfinity3.exe`: size, time and md5 (the md5 is computed again only when size or time change),
   and the build it belongs to;
 - `DisneyInfinity3_local.exe`, the patched copy;
-- the CrabeLoader marker `bink2w32_orig.dll`;
+- the CrabeLoader marker: `CrabeLoader.asi` (1.1 and later) or `bink2w32_orig.dll` (1.0);
 - `assets/presentation/presentation.zip`;
 - every `mods/<id>/mod.json` (name and version) plus a hash of that mod's file names, sizes and times.
   `*.log`, `*.tmp` and `*.bak` files and the `logs`, `di_saves` and `__pycache__` folders are ignored,
   so the client helper's own log never counts as a change;
-- `mods/dinet_online/dinet_bk.dll`.
+- `mods/dinet_online/dinet_bk.dll` and `mods/dinet_online/dinet_bk.asi` (the copy CrabeLoader 1.1+ loads).
 
 It compares each snapshot with the previous one, including the one saved before a restart.
 
@@ -82,7 +82,7 @@ It compares each snapshot with the previous one, including the one saved before 
 | `mod_updated` | info | A mod's `version` changed. Players need the same version to share levels. |
 | `mod_files_changed` | info | A mod's files changed without a version change. |
 | `client_dll_changed` | info | The installed helper DLL changed. |
-| `client_dll_mismatch` | warning | The installed helper isn't the build in `--client-dll` (default: the client folder next to this repository). |
+| `client_dll_mismatch` | warning | The installed helper (`.dll` or `.asi`) isn't the build in `--client-dll` (default: the client folder next to this repository). |
 
 Current warnings for the folder: unknown game build, CrabeLoader missing, client mod missing.
 

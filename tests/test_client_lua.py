@@ -182,6 +182,27 @@ class ChatLuaTest(unittest.TestCase):
                      "key(0x54) key(0x41) key(0x0D)")
         self.assertEqual(self.val("#calls.sent"), 0)                   # spark editor open: no chat
 
+    def test_editor_screen_survives_missing_helper(self):
+        # without dinet_bk the game's native rejects "#dinet:" keys with a Lua error (CrabeLoader 1.1 before
+        # dinet_bk.asi): the wrapped screen must still open
+        self.run_lua("Translator_TranslateString = function() error(\"bad argument #2 to 'tr'\") end "
+                     "RibbonToyBox = { onEnter = function(self) return 'ribbon' end } loadstring(patch_src)()")
+        self.assertEqual(self.val("RibbonToyBox.onEnter({})"), b"ribbon")
+
+    def test_asi_replaces_code_cave_on_crabe_1_1(self):
+        load = ("local f = loadstring(main_src, '=main.lua') f()")
+        with open(MAIN_LUA, "rb") as f:
+            self.g.main_src = f.read()
+        # CrabeLoader 1.1 with dinet_bk.asi: no code cave, no memory touched
+        self.run_lua("io = { open = function(p) if p == 'mods\\\\dinet_online\\\\dinet_bk.asi' then "
+                     "return { close = function() end } end end } "
+                     "Crabe.versionMajor, Crabe.versionMinor, Crabe.version = 1, 1, '1.1.0' "
+                     "Crabe._moduleBase = function() error('memory read') end calls.logs = {} " + load)
+        self.assertIn(b"loads dinet_bk.asi", self.val("calls.logs[1]"))
+        # CrabeLoader 1.0 (no .asi loader): the code cave path still runs
+        self.run_lua("Crabe.versionMinor, Crabe.version = 0, '1.0.0' calls.logs = {} " + load)
+        self.assertIn(b"loader error", self.val("calls.logs[1]"))
+
     def test_pause_closes_open_line(self):
         self.run_lua("key(0x54) for i = 1, 30 do mod.onUpdate(1 / 60) end key(0x41) key(0x0D)")
         self.assertEqual(self.val("#calls.sent"), 0)

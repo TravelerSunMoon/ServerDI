@@ -10,7 +10,8 @@ What it does (CrabeLoader must already be installed: bink2w32.dll + bink2w32_ori
   1. DisneyInfinity3_local.exe: a copy of the game whose Disney urls point to the server (patch_exe.py
      WITHOUT --dinet, so the copy still loads bink2w32.dll = CrabeLoader). The original executable is never
      modified.
-  2. mods\dinet_online: mod.json, main.lua (loads dinet_bk.dll from this folder), dinet_bk.dll and di_net.ini,
+  2. mods\dinet_online: mod.json, main.lua (loads dinet_bk.dll from this folder under CrabeLoader 1.0),
+     dinet_bk.dll, dinet_bk.asi (CrabeLoader 1.1+ loads it itself) and di_net.ini,
      taken from the client folder (crabe_mod\dinet_online here, or ..\ServerDI_Client\dinet_online).
   3. mods\dinet_online\presentation\presentation.zip: the online menus, built from YOUR game's own
      presentation.zip by patch_ui.py; CrabeLoader's virtual file system serves it instead of
@@ -59,9 +60,12 @@ def main(argv=None):
 
     if not os.path.exists(os.path.join(game, "DisneyInfinity3.exe")):
         raise SystemExit("DisneyInfinity3.exe not found in %s" % game)
-    if not os.path.exists(os.path.join(game, "bink2w32_orig.dll")):
-        raise SystemExit("CrabeLoader is not installed in this game folder (no bink2w32_orig.dll): run "
-                         "CrabeInstaller.exe first (https://github.com/LucasLhomme/CrabeLoader/releases).")
+    # CrabeLoader 1.0 replaced bink2w32.dll (original kept as bink2w32_orig.dll); 1.1+ is CrabeLoader.asi started
+    # by a dinput8.dll bootstrap
+    if not (os.path.exists(os.path.join(game, "bink2w32_orig.dll"))
+            or os.path.exists(os.path.join(game, "CrabeLoader.asi"))):
+        raise SystemExit("CrabeLoader is not installed in this game folder (no CrabeLoader.asi or bink2w32_orig.dll): "
+                         "run CrabeInstaller.exe first (https://github.com/LucasLhomme/CrabeLoader/releases).")
     dll = os.path.join(a.client, "dinet_bk.dll")
     if not os.path.exists(dll):
         dll = patch_exe.DINET_DLL                       # a freshly built one in dinet\
@@ -81,6 +85,9 @@ def main(argv=None):
     if os.path.exists(os.path.join(a.client, "di_net.ini")) and not os.path.exists(os.path.join(mod, "di_net.ini")):
         shutil.copy2(os.path.join(a.client, "di_net.ini"), os.path.join(mod, "di_net.ini"))   # defaults
     shutil.copy2(dll, os.path.join(mod, "dinet_bk.dll"))
+    # CrabeLoader 1.1+ loads <mod>\*.asi before the game starts; main.lua then skips its IsOnline code cave
+    # (1.1 patches IsOnline itself). CrabeLoader 1.0 ignores the .asi and main.lua loads the .dll as before.
+    shutil.copy2(dll, os.path.join(mod, "dinet_bk.asi"))
     patch_exe.write_dinet_ini(os.path.join(mod, "di_net.ini"), a.base)
 
     print("[3/3] online menus -> mods/%s/presentation/presentation.zip" % MOD_ID)

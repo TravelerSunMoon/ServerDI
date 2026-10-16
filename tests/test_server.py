@@ -80,6 +80,24 @@ class GameWatcherTest(unittest.TestCase):
         write(os.path.join(self.game, "mods", "dinet_online", "di_net.log"), b"new log line")
         self.assertEqual(self.w.check(), 0)
 
+    def test_crabeloader_1_1_asi(self):
+        self.w.check()
+        os.remove(os.path.join(self.game, "bink2w32_orig.dll"))          # 1.1 installer restores bink
+        write(os.path.join(self.game, "CrabeLoader.asi"), b"asi")
+        self.w.check()
+        self.assertNotIn("crabeloader_changed", self.kinds())
+        self.assertNotIn("CrabeLoader is not installed in the game folder", self.w.warnings())
+
+    def test_client_asi_mismatch(self):
+        ref = os.path.join(self.tmp, "ref_dinet_bk.dll")
+        write(ref, b"dll v1")
+        write(os.path.join(self.game, "mods", "dinet_online", "dinet_bk.asi"), b"dll v0, left behind")
+        w = gamewatch.GameWatcher(self.game, self.log, {}, client_dll=ref)
+        w.check()
+        msgs = [e["message"] for e in self.log.events if e["kind"] == "client_dll_mismatch"]
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("dinet_bk.asi", msgs[0])
+
     def test_client_dll_mismatch(self):
         ref = os.path.join(self.tmp, "ref_dinet_bk.dll")
         write(ref, b"dll v2")
