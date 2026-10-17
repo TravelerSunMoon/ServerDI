@@ -85,6 +85,26 @@ The server keeps the last 200 messages in memory, prints each one on the console
 `ip` is the address the server sees. For a player on the server PC itself, it's `--public-ip` or the
 LAN address instead.
 
+### Server directory (the in-game list, key F8)
+
+The client's F8 list is switched off for now (`SERVER_LIST = false` in the client's `main.lua`); these
+calls stay so it can come back in a future update.
+
+| Call | Purpose |
+|---|---|
+| `GET hello` | `name  players_online  server_version`. Cheap: the client pings every listed server with it (2 s timeout). |
+| `GET servers` | `name  url  description`, one server per line. This server comes first (`--server-name`, `--server-description`, its public url), then the servers in `<data>/servers.json`. |
+
+`servers.json` is optional and read on every request, so servers can be added while the server runs:
+
+```json
+[{"name": "Friend's server", "url": "http://203.0.113.7:85", "description": "Europe"}]
+```
+
+Entries without an `http://` url, duplicates of an earlier url, and tabs or line breaks in the text are
+dropped. The game can only use urls of 22 characters at most (the room in the exe copy); longer ones are
+listed but can't be picked.
+
 ## Diagnostics
 
 ### `GET /_status`

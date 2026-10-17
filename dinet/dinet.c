@@ -1018,19 +1018,21 @@ static void restore_saves(void)
 }
 
 /* ------------------------------------------------------------------ server (WinHTTP) */
-static int http(const wchar_t* verb, const char* path, const char* body, char* out, int outSize)
+/* a request to any server (the directory pings the ones it lists); timeoutMs bounds every step */
+static int http_to(const char* host, int port, int timeoutMs, const wchar_t* verb, const char* path,
+                   const char* body, char* out, int outSize)
 {
     HINTERNET s = NULL, c = NULL, r = NULL;
     wchar_t whost[128], wpath[256];
     DWORD status = 0, len = sizeof(status), got = 0, total = 0;
     int ok = 0;
-    MultiByteToWideChar(CP_UTF8, 0, g_serverHost, -1, whost, 128);
+    MultiByteToWideChar(CP_UTF8, 0, host, -1, whost, 128);
     MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 256);
     if (out && outSize) out[0] = 0;
-    s = WinHttpOpen(L"dinet_bk/3",                 /* protocol version: 3 = text chat */ WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    s = WinHttpOpen(L"dinet_bk/4",                 /* protocol version: 3 = text chat, 4 = server list */ WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!s) goto done;
-    WinHttpSetTimeouts(s, 3000, 3000, 3000, 5000);
-    c = WinHttpConnect(s, whost, (INTERNET_PORT)g_serverPort, 0);
+    WinHttpSetTimeouts(s, timeoutMs, timeoutMs, timeoutMs, timeoutMs + 2000);
+    c = WinHttpConnect(s, whost, (INTERNET_PORT)port, 0);
     if (!c) goto done;
     r = WinHttpOpenRequest(c, verb, wpath, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
     if (!r) goto done;
@@ -1048,6 +1050,11 @@ done:
     if (c) WinHttpCloseHandle(c);
     if (s) WinHttpCloseHandle(s);
     return ok;
+}
+
+static int http(const wchar_t* verb, const char* path, const char* body, char* out, int outSize)
+{
+    return http_to(g_serverHost, g_serverPort, 3000, verb, path, body, out, outSize);
 }
 
 static void url_encode(const char* in, char* out, int size)
@@ -1144,50 +1151,202 @@ static void unannounce(void)
     http(L"DELETE", path, NULL, NULL, 0);
 }
 
-static const char kJoinReady[] =
+/* ------------------------------------------------------------------ server directory (F8 in main.lua)
+ * main.lua draws the list; this DLL fetches it so the game never waits on the network:
+ *   servers:refresh   start a new fetch (worker thread)
+ *   servers           "<state>\n" then one line per server:
+ *                     name TAB url TAB description TAB online(0/1) TAB players TAB ping ms
+ *                     TAB running(1 = this session uses it) TAB chosen(1 = di_net.ini [server] url) TAB usable(1 = the
+ *                     url fits the exe: http://, at most 22 characters)
+ *                     state: "loading", "ready", or "none" (nothing asked yet)
+ *   useserver:<url>   [server] url = <url> for the next game start (dinet_bk rewrites the exe's server url in memory
+ *                     at start-up, see rewrite_exe_urls); "ok", or "long" / "bad"
+ * The list = the servers the current server hands out (GET /dinet/v1/servers: itself first, then its
+ * servers.json), plus [servers] of di_net.ini (lines "<any key> = Name|http://host:port|description"), plus the
+ * current server if neither has it. Every entry is pinged with GET /dinet/v1/hello (2 s at most). */
+static const char kJoinReady[] =               /* the in-game invite / join flows show it */
     "Union preparada.\n\nAhora sal al menu principal y entra a una Toy Box: el juego se conectara a esa "
     "partida en vez de abrir la tuya.\n\nSi no entras en 2 minutos se cancela sola. F9 cancela.";
 
-static void choose_host(HWND owner)
+#define DIR_MAX 16
+struct dir_entry { char name[48], url[128], desc[128], key[128]; };
+static CRITICAL_SECTION g_dirLock;
+static char g_dirText[8192] = "none\n";
+static volatile LONG g_dirWanted, g_dirBusy;
+static char g_runningUrl[128];                  /* the server this session talks to (url at start-up) */
+
+static int split_url(const char* url, char* host, int hostSize, int* port)
 {
-    char list[4096], msg[512], *line, *next;
-    int count = 0;
-    if (!http(L"GET", "/dinet/v1/hosts", NULL, list, sizeof(list))) {
-        MessageBoxA(owner, "No se pudo leer la lista de partidas del servidor.", "Disney Infinity - unirse",
-                    MB_OK | MB_ICONWARNING | MB_TOPMOST);
-        return;
-    }
-    for (line = list; line && *line; line = next) {
-        char name[64] = "", ip[32] = "", priv[32] = "";
-        int port = 0, answer;
-        next = strchr(line, '\n');
-        if (next) *next++ = 0;
-        if (sscanf(line, "%63[^\t]\t%31[^\t]\t%31[^\t]\t%d", name, ip, priv, &port) != 4) continue;
-        if (_stricmp(name, g_name) == 0) continue;                 /* ourselves */
-        count++;
-        _snprintf(msg, sizeof(msg), "Unirse a la partida de %s?\n\n%s (red local %s), puerto UDP %d\n\n"
-                  "Si: preparar la union\nNo: siguiente partida\nCancelar: salir", name, ip, priv, port);
-        msg[sizeof(msg) - 1] = 0;
-        answer = MessageBoxA(owner, msg, "Disney Infinity - unirse", MB_YESNOCANCEL | MB_ICONQUESTION | MB_TOPMOST);
-        if (answer == IDCANCEL) return;
-        if (answer == IDYES) {
-            const char* why = zones_mismatch(name);
-            if (why) {
-                MessageBoxA(owner, why, "Disney Infinity - unirse", MB_OK | MB_ICONWARNING | MB_TOPMOST);
-                return;
-            }
-            if (!prepare_join(name, ip, priv, port)) {
-                MessageBoxA(owner, "El juego todavia no tiene sesion de red. Entra al menu principal y prueba otra vez.",
-                            "Disney Infinity - unirse", MB_OK | MB_ICONWARNING | MB_TOPMOST);
-                return;
-            }
-            MessageBoxA(owner, kJoinReady, "Disney Infinity - unirse", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
-            return;
+    const char* h = strstr(url, "://");
+    const char* end;
+    int n;
+    h = h ? h + 3 : url;
+    end = h + strcspn(h, ":/");
+    n = (int)(end - h);
+    if (n <= 0 || n >= hostSize) return 0;
+    memcpy(host, h, n);
+    host[n] = 0;
+    *port = *end == ':' ? atoi(end + 1) : 80;
+    return *port > 0 && *port < 65536;
+}
+
+static void url_norm(const char* in, char* out, int size)
+{
+    char tmp[256];
+    int n;
+    strncpy(tmp, in, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = 0;
+    n = (int)strlen(tmp);
+    while (n > 0 && (tmp[n - 1] == '/' || tmp[n - 1] == ' ')) tmp[--n] = 0;
+    CharLowerA(tmp);
+    strncpy(out, tmp, size - 1);
+    out[size - 1] = 0;
+}
+
+static int url_usable(const char* url)
+{
+    return !strncmp(url, "http://", 7) && strlen(url) <= 22 && !strpbrk(url, " \t\r\n\"");
+}
+
+static void dir_add(struct dir_entry* e, int* n, const char* name, const char* url, const char* desc)
+{
+    char key[128];
+    int j;
+    url_norm(url, key, sizeof(key));
+    if (!key[0] || *n >= DIR_MAX) return;
+    for (j = 0; j < *n; j++) if (!strcmp(e[j].key, key)) return;
+    strncpy(e[*n].name, name, sizeof(e[*n].name) - 1);
+    e[*n].name[sizeof(e[*n].name) - 1] = 0;
+    strncpy(e[*n].url, url, sizeof(e[*n].url) - 1);
+    e[*n].url[sizeof(e[*n].url) - 1] = 0;
+    strncpy(e[*n].desc, desc, sizeof(e[*n].desc) - 1);
+    e[*n].desc[sizeof(e[*n].desc) - 1] = 0;
+    strcpy(e[*n].key, key);
+    (*n)++;
+}
+
+static void fetch_directory(void)
+{
+    static struct dir_entry e[DIR_MAX];
+    static char list[8192], out[8192], section[4096];
+    char chosen[128], run[128], line[512], *p, *next;
+    int n = 0, i, len;
+    GetPrivateProfileStringA("server", "url", "", chosen, sizeof(chosen), g_iniPath);
+    url_norm(chosen, chosen, sizeof(chosen));
+    url_norm(g_runningUrl, run, sizeof(run));
+    if (http(L"GET", "/dinet/v1/servers", NULL, list, sizeof(list))) {
+        for (p = list; p && *p; p = next) {
+            char name[48] = "", url[128] = "", desc[128] = "";
+            next = strchr(p, '\n');
+            if (next) *next++ = 0;
+            if (sscanf(p, "%47[^\t]\t%127[^\t\r]\t%127[^\r]", name, url, desc) >= 2) dir_add(e, &n, name, url, desc);
         }
     }
-    MessageBoxA(owner, count ? "No elegiste ninguna partida." :
-                "No hay partidas publicadas. El anfitrion tiene que estar dentro de una Toy Box con el juego "
-                "parcheado (dinet_bk).", "Disney Infinity - unirse", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+    if (GetPrivateProfileSectionA("servers", section, sizeof(section), g_iniPath)) {
+        for (p = section; *p; p += strlen(p) + 1) {
+            char name[48] = "", url[128] = "", desc[128] = "";
+            const char* v = strchr(p, '=');
+            if (v && sscanf(v + 1, " %47[^|]|%127[^|]|%127[^\r\n]", name, url, desc) >= 2) dir_add(e, &n, name, url, desc);
+        }
+    }
+    {
+        char cur[160];
+        _snprintf(cur, sizeof(cur), "http://%s:%d", g_serverHost, g_serverPort);
+        cur[sizeof(cur) - 1] = 0;
+        dir_add(e, &n, "Current server", g_runningUrl[0] ? g_runningUrl : cur, "");
+    }
+    len = _snprintf(out, sizeof(out), "ready\n");
+    for (i = 0; i < n; i++) {
+        char host[128], hello[256], sname[48] = "";
+        int port, online = 0, players = 0;
+        DWORD t0 = GetTickCount(), ms = 0;
+        if (split_url(e[i].url, host, sizeof(host), &port) &&
+            http_to(host, port, 2000, L"GET", "/dinet/v1/hello", NULL, hello, sizeof(hello))) {
+            online = 1;
+            ms = GetTickCount() - t0;
+            sscanf(hello, "%47[^\t]\t%d", sname, &players);
+        }
+        _snprintf(line, sizeof(line), "%s\t%s\t%s\t%d\t%d\t%lu\t%d\t%d\t%d\n", e[i].name, e[i].url, e[i].desc,
+                  online, players, (unsigned long)ms, !strcmp(e[i].key, run), !strcmp(e[i].key, chosen),
+                  url_usable(e[i].url));
+        line[sizeof(line) - 1] = 0;
+        if (len + (int)strlen(line) < (int)sizeof(out) - 1) { strcpy(out + len, line); len += (int)strlen(line); }
+    }
+    EnterCriticalSection(&g_dirLock);
+    strcpy(g_dirText, out);
+    LeaveCriticalSection(&g_dirLock);
+    logf("servers: %d in the list", n);
+}
+
+static DWORD WINAPI dir_thread(LPVOID unused)
+{
+    (void)unused;
+    fetch_directory();
+    InterlockedExchange(&g_dirBusy, 0);
+    return 0;
+}
+
+/* The exe copy has the server url written into its Disney service strings (patch_exe.py, [server] exe_url).
+ * When the player chose another server (F8), rewrite those strings in memory before the game reads them:
+ * CrabeLoader 1.1+ loads dinet_bk.asi before the game code runs. Same rule as patch_exe.py: the new url must
+ * not be longer than the room the old string had (its zero padding included). */
+static void rewrite_exe_urls(void)
+{
+    char want[128], have[128];
+    BYTE* img = (BYTE*)g_base;
+    BYTE *p, *end, *q;
+    IMAGE_NT_HEADERS* nt;
+    DWORD size, hits = 0, skipped = 0;
+    size_t hl, wl;
+    GetPrivateProfileStringA("server", "url", "", want, sizeof(want), g_iniPath);
+    GetPrivateProfileStringA("server", "exe_url", "", have, sizeof(have), g_iniPath);
+    url_norm(want, want, sizeof(want));
+    url_norm(have, have, sizeof(have));
+    strncpy(g_runningUrl, have[0] ? have : want, sizeof(g_runningUrl) - 1);
+    if (!have[0]) {                                  /* older install: the exe was patched with [server] url */
+        if (want[0]) WritePrivateProfileStringA("server", "exe_url", want, g_iniPath);
+        return;
+    }
+    if (!want[0] || !strcmp(want, have)) return;
+    if (!url_usable(want)) {
+        logf("servers: [server] url %s does not fit the exe (http://, 22 characters at most); keeping %s", want, have);
+        split_url(have, g_serverHost, sizeof(g_serverHost), &g_serverPort);
+        return;
+    }
+    nt = (IMAGE_NT_HEADERS*)(img + ((IMAGE_DOS_HEADER*)img)->e_lfanew);
+    size = nt->OptionalHeader.SizeOfImage;
+    hl = strlen(have);
+    wl = strlen(want);
+    for (p = img; p < img + size; p = end) {           /* one committed, readable region at a time */
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery(p, &mi, sizeof(mi))) break;
+        end = (BYTE*)mi.BaseAddress + mi.RegionSize;
+        if (end > img + size) end = img + size;
+        if (mi.State != MEM_COMMIT || (mi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+            !(mi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                            PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)))
+            continue;
+        for (q = p; q + hl + 1 < end; q++) {
+            size_t rest, room, k;
+            DWORD old;
+            if (*q != have[0] || _strnicmp((char*)q, have, hl) != 0) continue;
+            if (q[hl] != '/' && q[hl] != 0 && q[hl] != '?') continue;
+            for (rest = 0; q + hl + rest < end && q[hl + rest]; rest++) ;
+            for (room = hl + rest + 1; q + room < end && q[room] == 0 && room < 512; room++) ;
+            if (wl + rest + 1 > room) { skipped++; continue; }
+            if (!VirtualProtect(q, room, PAGE_READWRITE, &old)) { skipped++; continue; }
+            memmove(q + wl, q + hl, rest + 1);
+            memcpy(q, want, wl);
+            for (k = wl + rest + 1; k < hl + rest + 1; k++) q[k] = 0;
+            VirtualProtect(q, room, old, &old);
+            hits++;
+            q += wl + rest;
+        }
+    }
+    /* the DLL talks to the server the game uses: the new one only if the exe strings now point there */
+    if (hits) strncpy(g_runningUrl, want, sizeof(g_runningUrl) - 1);
+    split_url(hits ? want : have, g_serverHost, sizeof(g_serverHost), &g_serverPort);
+    logf("servers: exe urls %s -> %s: %lu rewritten, %lu without room", have, want, hits, skipped);
 }
 
 static void cancel_join(const char* why, int keepHost)
@@ -1672,6 +1831,32 @@ static const char* bridge(const char* cmd)
         return reply;
     }
     if (!strcmp(cmd, "chatcfg")) return g_chatCfg;
+    /* server directory (F8): the list is fetched by the worker, see fetch_directory */
+    if (!strcmp(cmd, "servers")) {
+        EnterCriticalSection(&g_dirLock);
+        strcpy(reply, g_dirText);
+        LeaveCriticalSection(&g_dirLock);
+        if (g_dirWanted || g_dirBusy) {            /* a fetch is pending: say so, keep the last list */
+            char* nl = strchr(reply, '\n');
+            if (nl) { memmove(reply + 8, nl + 1, strlen(nl + 1) + 1); memcpy(reply, "loading\n", 8); }
+            else strcpy(reply, "loading\n");
+        }
+        return reply;
+    }
+    if (!strcmp(cmd, "servers:refresh")) {
+        InterlockedExchange(&g_dirWanted, 1);
+        return "ok";
+    }
+    if (!strncmp(cmd, "useserver:", 10)) {
+        char url[128];
+        url_norm(cmd + 10, url, sizeof(url));
+        if (strncmp(url, "http://", 7) || strpbrk(url, " \t\r\n\"")) return "bad";
+        if (strlen(url) > 22) return "long";
+        WritePrivateProfileStringA("server", "url", url, g_iniPath);
+        logf("servers: next start uses %s", url);
+        InterlockedExchange(&g_dirWanted, 1);       /* the list shows the new choice */
+        return "ok";
+    }
     if (!strncmp(cmd, "typing:", 7)) {              /* main.lua: the chat line is open (renewed) / closed */
         DWORD now = GetTickCount();
         g_typingTick = cmd[7] == '1' ? (now ? now : 1) : 0;
@@ -2073,7 +2258,7 @@ static DWORD WINAPI social_worker(LPVOID unused)
 static DWORD WINAPI worker(LPVOID unused)
 {
     DWORD lastAnnounce = 0;
-    int f8 = 0, f9 = 0;
+    int f9 = 0;
     (void)unused;
     if (g_protectSaves) snapshot_saves();
     detect_private_ip();
@@ -2081,17 +2266,22 @@ static DWORD WINAPI worker(LPVOID unused)
          g_privateIp, g_name, g_netPort);
     for (;;) {
         HWND w = game_window();
-        int down8 = w && (GetAsyncKeyState(VK_F8) & 0x8000);
         int down9 = w && (GetAsyncKeyState(VK_F9) & 0x8000);
-        if (down8 && !f8) choose_host(w);
+        /* F8 is main.lua's server list now (the old join picker was a test tool; joins run in the game's menus) */
         if (down9 && !f9) {
             if (g_joinArmed || g_fakeHostActive) {
                 cancel_join("F9", 0);
-                MessageBoxA(w, "Union cancelada.", "Disney Infinity - unirse", MB_OK | MB_TOPMOST);
+                MessageBoxA(w, "Join cancelled.", "Disney Infinity - join", MB_OK | MB_TOPMOST);
             }
         }
-        f8 = down8;
         f9 = down9;
+        if (g_dirWanted && !InterlockedExchange(&g_dirBusy, 1)) {   /* pings can take seconds: own thread */
+            HANDLE th;
+            InterlockedExchange(&g_dirWanted, 0);
+            th = CreateThread(NULL, 0, dir_thread, NULL, 0, NULL);
+            if (th) CloseHandle(th);
+            else InterlockedExchange(&g_dirBusy, 0);
+        }
         if (!g_netErrorOrig) hook_net_error_vtable();
         /* the engine read the host while opening the session: stop answering for it, so the next
            level load hosts normally again unless the player prepares another join */
@@ -2178,7 +2368,10 @@ static void start(void)
     _snprintf(g_luaPath, MAX_PATH, "%s\\dinet.lua", dir);
     InitializeCriticalSection(&g_socialLock);
     InitializeCriticalSection(&g_chatLock);
+    InitializeCriticalSection(&g_dirLock);
     read_settings();
+    g_base = (DWORD)GetModuleHandleA(NULL);
+    rewrite_exe_urls();                         /* the server chosen in the F8 list (before the game reads its urls) */
 
     g_base = (DWORD)GetModuleHandleA(NULL);
     find_text();

@@ -6,16 +6,20 @@ Installs the online client as a CrabeLoader mod: <game>\mods\dinet_online.
                                 --base http://127.0.0.1:8085 [--login-user NAME]
     python install_crabe_mod.py --game "..." --remove
 
-What it does (CrabeLoader must already be installed: bink2w32.dll + bink2w32_orig.dll):
+What it does (CrabeLoader must already be installed: 1.1+ dinput8.dll + CrabeLoader.asi, or 1.0
+bink2w32.dll + bink2w32_orig.dll):
   1. DisneyInfinity3_local.exe: a copy of the game whose Disney urls point to the server (patch_exe.py
-     WITHOUT --dinet, so the copy still loads bink2w32.dll = CrabeLoader). The original executable is never
-     modified.
+     WITHOUT --dinet, so the copy still loads CrabeLoader: it imports the same dinput8.dll / bink2w32.dll).
+     The original executable is never modified.
   2. mods\dinet_online: mod.json, main.lua (loads dinet_bk.dll from this folder under CrabeLoader 1.0),
      dinet_bk.dll, dinet_bk.asi (CrabeLoader 1.1+ loads it itself) and di_net.ini,
      taken from the client folder (crabe_mod\dinet_online here, or ..\ServerDI_Client\dinet_online).
-  3. mods\dinet_online\presentation\presentation.zip: the online menus, built from YOUR game's own
+  3. mods\dinet_online\assets\presentation\presentation.zip: the online menus, built from YOUR game's own
      presentation.zip by patch_ui.py; CrabeLoader's virtual file system serves it instead of
-     assets\presentation\presentation.zip, which is left untouched.
+     assets\presentation\presentation.zip, which is left untouched. (Older installs put it in
+     mods\dinet_online\presentation\, which CrabeLoader 1.1 no longer serves; that copy is removed.)
+     With --login-user the game signs in to the server by itself at start-up (the main menu opens the
+     Disney ID screen once, which presses Log In as that user): no need to press Save Migration.
 --remove deletes the mod folder and the exe copy.
 """
 import argparse
@@ -47,6 +51,8 @@ def main(argv=None):
                     help="folder with the client mod files (main.lua, mod.json, dinet_bk.dll)")
     ap.add_argument("--login-user", default=os.environ.get("USERNAME", ""),
                     help="Save Migration signs in by itself with this server user name")
+    ap.add_argument("--no-autologin", dest="autologin", action="store_false",
+                    help="do not sign in at start-up; only when Save Migration is pressed")
     ap.add_argument("--ditool", default=patch_ui.DEFAULT_DITOOL)
     ap.add_argument("--remove", action="store_true", help="remove the mod and the exe copy")
     a = ap.parse_args(argv)
@@ -90,16 +96,23 @@ def main(argv=None):
     shutil.copy2(dll, os.path.join(mod, "dinet_bk.asi"))
     patch_exe.write_dinet_ini(os.path.join(mod, "di_net.ini"), a.base)
 
-    print("[3/3] online menus -> mods/%s/presentation/presentation.zip" % MOD_ID)
+    print("[3/3] online menus -> mods/%s/assets/presentation/presentation.zip" % MOD_ID)
     args = ["--game", game, "--ditool", a.ditool, "--friends-list",
-            "--out", os.path.join(mod, "presentation", "presentation.zip")]
+            "--out", os.path.join(mod, "assets", "presentation", "presentation.zip")]
     if a.login_user:
         args += ["--login-user", a.login_user]
+        if a.autologin:
+            args += ["--autologin"]
     patch_ui.main(args)
+    old = os.path.join(mod, "presentation", "presentation.zip")      # layout of installs before 1.1 support
+    if os.path.exists(old):
+        os.remove(old)
+        print("Removed the old copy", old)
     if os.path.exists(os.path.join(game, "assets", "presentation", "presentation.zip.orig")):
         print("Note: assets/presentation/presentation.zip was patched in place by an older install; "
               "the mod's copy is used while CrabeLoader runs.")
-    if os.path.isdir(os.path.join(game, "mods", "monstersu_port")):
+    if any(os.path.exists(os.path.join(game, "mods", "monstersu_port", *p, "presentation.zip"))
+           for p in (("assets", "presentation"), ("presentation",))):
         print("WARNING: mods\\monstersu_port also serves presentation.zip and wins over this mod. Reinstall "
               "that mod AFTER this one so both sets of menu changes are merged.")
     print("Done. Start the game with DisneyInfinity3_local.exe (Steam open). Log: mods/%s/di_net.log" % MOD_ID)

@@ -148,6 +148,7 @@ class ServerTest(unittest.TestCase):
         srv.lobby, srv.presence, srv.invites, srv.requests = {}, {}, {}, {}
         srv.chat, srv.chat_next, srv.chat_lock = [], 1, threading.Lock()
         srv.player_name, srv.country, srv.allow_login = "Player", "US", True
+        srv.server_name, srv.server_description = "TestServer", "for the tests"
         cls.srv = srv
         cls.base = "http://127.0.0.1:%d" % srv.server_address[1]
         cls.thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -205,6 +206,29 @@ class ServerTest(unittest.TestCase):
         last = ev[-1]["id"]
         self.assertEqual(json.loads(self.call("GET", "/_changes?since=%d" % last)[1])["events"], [])
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "data", "watch_state.json")))
+
+    def test_server_directory(self):
+        st, body = self.call("GET", "/dinet/v1/hello")
+        self.assertEqual(st, 200)
+        name, online, version = body.decode().rstrip("\n").split("\t")
+        self.assertEqual((name, version), ("TestServer", di_server.VERSION))
+        # no servers.json: only this server
+        st, body = self.call("GET", "/dinet/v1/servers")
+        lines = body.decode().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0].split("\t")[0], "TestServer")
+        # servers.json adds others (read on every request); duplicates, bad urls and tabs are dropped
+        fp = os.path.join(self.srv.store.root, "servers.json")
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump([{"name": "Friend\tServer", "url": "http://10.0.0.5:85/", "description": "LAN"},
+                       {"name": "Dup", "url": "http://10.0.0.5:85"}, {"name": "Bad", "url": "ftp://x"},
+                       "junk"], f)
+        try:
+            st, body = self.call("GET", "/dinet/v1/servers")
+            lines = body.decode().splitlines()
+            self.assertEqual(lines[1:], ["Friend Server\thttp://10.0.0.5:85\tLAN"])
+        finally:
+            os.remove(fp)
 
     def test_chat(self):
         form = "application/x-www-form-urlencoded"

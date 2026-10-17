@@ -522,9 +522,11 @@ def main(argv=None):
     ap.add_argument("--ditool", default=DEFAULT_DITOOL, help="path of tool/ditool.py")
     ap.add_argument("--restore", action="store_true", help="restore the original presentation.zip")
     ap.add_argument("--autologin", action="store_true",
-                    help="sign in to Disney ID by itself when the main menu is shown (once per game start). "
-                         "NOT useful in the Gold Edition: every sign-in runs its one-shot cloud migration "
-                         "(replaces the local saves with the cloud ones) and then signs out again")
+                    help="sign in to Disney ID by itself when the main menu is shown (once per game start, only "
+                         "when not signed in): what pressing Save Migration does. In the Gold Edition every "
+                         "sign-in runs its cloud migration (the server's saves replace the local ones) and then "
+                         "signs out; dinet_bk.dll keeps the session (block_signout) and backs the saves up "
+                         "(protect). Use with --login-user so the Disney ID screen presses Log In by itself")
     ap.add_argument("--no-signin-button", dest="signin_button", action="store_false",
                     help="do not show the Save Migration / Disney ID entry in the main menu")
     ap.add_argument("--login-user", default="",

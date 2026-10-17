@@ -54,6 +54,7 @@ Game = {
   ActorPosition = function(h) if h == 100 then return 0, 0, 0 end return 2, 0, 3 end,
 }
 typing, pad = false, false
+serverlist, useanswer = "ready\nMine\thttp://127.0.0.1:8085\tLocal\t1\t2\t3\t1\t1\t1\n", "ok"
 UI_GetGamerTag = function(id) if id == 0 then return "MeTag" end return "FriendTag" end
 UI_CurrentWorldName = function() return world end
 playset, ini = "", {}
@@ -72,6 +73,9 @@ Translator_TranslateString = function(key)
     else editors = 0 end
     return "ok"
   end
+  if cmd == "servers" then return serverlist end
+  if cmd == "servers:refresh" then calls.refresh = (calls.refresh or 0) + 1 return "ok" end
+  if string.sub(cmd, 1, 10) == "useserver:" then calls.used = string.sub(cmd, 11) return useanswer end
   if cmd == "me" then return "Me" end
   if cmd == "chat" then local r = inbox; inbox = ""; return r end
   if string.sub(cmd, 1, 8) == "chatkey:" then
@@ -202,6 +206,15 @@ class ChatLuaTest(unittest.TestCase):
         # CrabeLoader 1.0 (no .asi loader): the code cave path still runs
         self.run_lua("Crabe.versionMinor, Crabe.version = 0, '1.0.0' calls.logs = {} " + load)
         self.assertIn(b"loader error", self.val("calls.logs[1]"))
+
+    def test_f8_is_switched_off(self):
+        # the server list exists in main.lua but SERVER_LIST = false: F8 opens nothing and captures no keys
+        self.run_lua("calls.captured = {} calls.draws = 0 key(0x77) frame() key(0x0D) frame()")
+        self.assertIsNone(self.val("calls.refresh"))
+        self.assertIsNone(self.val("calls.used"))
+        self.assertEqual(self.val("#calls.captured"), 0)
+        self.run_lua("key(0x54) key(0x41) key(0x0D) frame()")           # the chat still works
+        self.assertEqual(self.val("#calls.sent"), 1)
 
     def test_pause_closes_open_line(self):
         self.run_lua("key(0x54) for i = 1, 30 do mod.onUpdate(1 / 60) end key(0x41) key(0x0D)")

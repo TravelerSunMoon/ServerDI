@@ -25,7 +25,8 @@ The game side is a CrabeLoader mod in a separate folder, [`../ServerDI_Client`](
 
 ## Quick start
 
-1. Install **CrabeLoader** in the game folder.
+1. Install **CrabeLoader** in the game folder (1.1 or later: `dinput8.dll` + `CrabeLoader.asi`; 1.0 also
+   works). After updating CrabeLoader, run step 2 again.
 2. Install the client mod and the patched exe copy:
 
    ```
@@ -64,6 +65,8 @@ python di_server.py [options]
   --public-ip IP          address announced to players joining a Toy Box hosted on this PC
   --data DIR              data folder (default: ./data)
   --name Player           display name of the first account
+  --server-name ServerDI  name of this server in the in-game server list (F8)
+  --server-description T  one line shown under it in that list
   --country US            country reported at sign-in
   --allow-login           accept Disney ID sign-ins (see "Known limits")
   --game DIR              watch this game folder for changes (read only)
@@ -86,6 +89,7 @@ python di_server.py [options]
 | Entitlement, MagicBand | "Nothing here" (404). |
 | CDN (posters, icons) | Files from `data/cdn/`, if you add any. |
 | Lobby (`/dinet/v1/...`) | Hosts, presence, friends, invites, join requests and text chat for the client helper. |
+| Server directory (`/dinet/v1/servers`, `/hello`) | The in-game server list (F8, switched off in the client for now): this server first, then the ones in `data/servers.json` (optional; empty until you add servers). |
 | `/_status`, `/_changes` | Diagnostics: players online, warnings, watched game state, change events. |
 
 The full HTTP reference is in [docs/http-api.md](docs/http-api.md).
@@ -114,8 +118,11 @@ Every request is logged to `data/logs/requests.jsonl`. `python di_server.py --ta
 - **Signing in on the Gold Edition.** Every Disney ID sign-in runs the edition's one-time "save
   migration": it downloads the cloud saves, replaces the local ones and then signs out. The server
   refuses sign-ins by default to protect your saves. The client mod's `block_signout` and `protect`
-  options keep the session and restore what the migration deletes. Storing Toy Boxes in the cloud
-  still doesn't work.
+  options keep the session and restore what the migration deletes. The installer signs you in by
+  itself once per game start (`--login-user`, `--no-autologin` to opt out), so the migration runs at
+  every start: the server's saves replace the local ones, exactly as when you press Save Migration.
+  `protect` backs the saves up to `<game>/di_saves` first. Storing Toy Boxes in the cloud still doesn't
+  work.
 - Only **Steam build 1522802** is supported by the exe code patch and the client helper. The change
   detector warns when the exe becomes a different build.
 - Matchmaking with strangers (the old NAT negotiation service) isn't implemented. Players join each

@@ -123,6 +123,9 @@ def write_dinet_ini(path, base):
     if not cp.has_section("server"):
         cp.add_section("server")
     cp.set("server", "url", base.rstrip("/"))
+    cp.set("server", "exe_url", base.rstrip("/"))       # the url written into the exe copy (see dinet_bk F8 list)
+    if not cp.has_section("servers"):
+        cp.add_section("servers")
     with open(path, "w", encoding="utf-8") as f:
         f.write("; dinet_bk.dll settings\n"
                 "; [signin] block_signout=1 keeps the Disney ID session after the Gold cloud migration;\n"
@@ -144,7 +147,12 @@ def write_dinet_ini(path, base):
                 ";        theme=1: the chat takes the colours of the playset you play (0 = always blue)\n"
                 "; [chat_colors] (optional) your own colours per playset: <playset> = border,panel,name as RRGGBB,\n"
                 ";        e.g. InsideOut = EB6EC8,3C1955,FFC8F0. di_net.log shows the playset name on every level\n"
-                "; [server] url = the local server (set by patch_exe.py)\n")
+                "; [server] url = the server the game uses (set by patch_exe.py; the F8 server list changes it,\n"
+                ";          it applies at the next game start). exe_url = the url written into the exe copy:\n"
+                ";          when url differs, dinet_bk rewrites the exe's urls in memory at start-up (CrabeLoader\n"
+                ";          1.1+; http:// and at most 22 characters)\n"
+                "; [servers] (optional) more servers for the F8 list, one per line:\n"
+                ";          <any key> = Name|http://host:port|description\n")
         cp.write(f)
 
 

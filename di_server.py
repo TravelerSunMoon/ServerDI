@@ -55,7 +55,7 @@ from urllib.parse import parse_qs, urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gamewatch  # noqa: E402
 
-VERSION = "0.2"
+VERSION = "0.3"
 HERE = os.path.dirname(os.path.abspath(__file__))
 # client helper shipped with the client mod, used to spot an outdated copy in the watched game folder
 # (ServerDI_Client next to this folder, or the dinet\ build folder of the development copy)
@@ -101,6 +101,20 @@ POLL_PREFIXES = ("/dinet/v1/host", "/dinet/v1/presence", "/dinet/v1/players", "/
                  "/dinet/v1/requests", "/dinet/v1/chat")
 CHAT_KEEP = 200          # messages kept in memory (clients only ask for the ones newer than they have)
 CHAT_TEXT = 120          # longest message, in characters
+
+
+def load_directory(data_dir):
+    """Other servers this one lists to the players (<data>/servers.json, a JSON list of
+    {"name", "url", "description"}); [] when the file is missing or invalid. Read on every request, so
+    servers can be added while the server runs."""
+    fp = os.path.join(data_dir, "servers.json")
+    try:
+        with open(fp, encoding="utf-8") as f:
+            items = json.load(f)
+    except (OSError, ValueError):
+        return []
+    return [s for s in items if isinstance(s, dict) and str(s.get("url", "")).startswith("http://")] \
+        if isinstance(items, list) else []
 
 
 def lan_ip():
@@ -445,7 +459,33 @@ class Handler(BaseHTTPRequestHandler):
             lines = ["%s\t%s\t%s\t%d" % (h["name"], h["ip"], h["private_ip"], h["port"])
                      for h in sorted(hosts.values(), key=lambda h: h["name"].lower())]
             return self._send(200, "".join(l + "\n" for l in lines), "text/plain")
+        if action in ("hello", "servers") and self.command == "GET":
+            return self.h_directory(action, now)
         return self.h_social(action, hosts, now)
+
+    # ------------------------------------------------------------------ server directory (F8 in the game)
+    #   GET /dinet/v1/hello     name TAB players online TAB server version   (cheap: the client pings it)
+    #   GET /dinet/v1/servers   one server per line: name TAB url TAB description. This server first, then
+    #                           the servers listed in <data>/servers.json:
+    #                           [{"name": "...", "url": "http://host:port", "description": "..."}, ...]
+    #                           (a list other servers can hand out too; empty today)
+    def h_directory(self, action, now):
+        """Server directory for the in-game server list (dinet_bk.dll, key F8)."""
+        clean = lambda s, n: re.sub(r"[\t\r\n]", " ", str(s or "")).strip()[:n]
+        if action == "hello":
+            online = sum(1 for p in self.server.presence.values() if now - p["seen"] <= self.PRESENCE_TTL)
+            return self._send(200, "%s\t%d\t%s\n" % (clean(self.server.server_name, 40), online, VERSION),
+                              "text/plain")
+        lines = ["%s\t%s\t%s" % (clean(self.server.server_name, 40), self.base_url(),
+                                 clean(self.server.server_description, 120))]
+        seen = {self.base_url().lower()}
+        for s in load_directory(self.server.store.root):
+            url = clean(s.get("url"), 120).rstrip("/")
+            if url.lower() in seen:
+                continue
+            seen.add(url.lower())
+            lines.append("%s\t%s\t%s" % (clean(s.get("name") or url, 40), url, clean(s.get("description"), 120)))
+        return self._send(200, "".join(l + "\n" for l in lines), "text/plain")
 
     # ------------------------------------------------------------------ friends / invites (dinet_bk.dll)
     # Every game with dinet_bk is everybody's "friend" while it is connected to this server.
@@ -824,6 +864,8 @@ def main(argv=None):
                          "(default: its LAN address, enough for players on the same network)")
     ap.add_argument("--data", default=os.path.join(HERE, "data"), help="data folder")
     ap.add_argument("--name", default="Player", help="display name of the first local account")
+    ap.add_argument("--server-name", default="ServerDI", help="name of this server in the in-game server list (F8)")
+    ap.add_argument("--server-description", default="", help="one line shown under the name in the server list")
     ap.add_argument("--country", default="US")
     ap.add_argument("--allow-login", action="store_true",
                     help="accept Disney ID sign-ins (WARNING: the game then replaces its local saves with the "
@@ -856,6 +898,7 @@ def main(argv=None):
     srv.requests = {}
     srv.chat, srv.chat_next, srv.chat_lock = [], 1, threading.Lock()
     srv.player_name = a.name
+    srv.server_name, srv.server_description = a.server_name, a.server_description
     srv.country = a.country
     srv.allow_login = a.allow_login
     if not a.allow_login:

@@ -75,7 +75,10 @@ bytecode level, repacks the archive and verifies it.
     user name;
   - `--friends-list` (`inject_ui_funcs`): embeds the compiled `dinet/ui_funcs.luac` so the friends
     and invites screens list the server's players;
-  - `--mp-buttons`, `--friends` (experimental), `--autologin` (not useful on the Gold Edition).
+  - `--autologin` (`inject_autologin`): the main menu calls `UI_InitiateDisneyID()` once per start when
+    nobody is signed in, which is what Save Migration does; with `--login-user` the whole sign-in runs
+    by itself;
+  - `--mp-buttons`, `--friends` (experimental).
 - `--out FILE` writes the result somewhere else, such as the CrabeLoader mod folder, and leaves the
   game's file untouched. `--restore` puts back the original kept as `presentation.zip.orig` (older
   in-place installs only).
@@ -84,7 +87,9 @@ bytecode level, repacks the archive and verifies it.
 
 Runs `patch_exe.py` (without `--dinet`, so the copy still loads CrabeLoader) and copies the client
 mod from `../ServerDI_Client/dinet_online` (or `--client`) to `<game>/mods/dinet_online`. It then
-writes `di_net.ini` and builds the mod's `presentation/presentation.zip` with `patch_ui.py --out`.
+writes `di_net.ini` and builds the mod's `assets/presentation/presentation.zip` with `patch_ui.py --out`
+(with `--login-user` and, unless `--no-autologin`, `--autologin`). It also installs the helper as
+`dinet_bk.asi` for CrabeLoader 1.1+.
 `--remove` uninstalls.
 
 ## `read_zones.py`: level ids
